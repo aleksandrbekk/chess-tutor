@@ -12,6 +12,7 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
     "@telegram-apps/sdk": "^3.11.8",
+    "@twa-dev/sdk": "^8.0.2",
     "chess.js": "^1.4.0",
     "react": "^19.2.0",
     "react-chessboard": "^5.8.6",
