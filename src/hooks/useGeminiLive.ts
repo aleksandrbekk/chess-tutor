@@ -31,8 +31,6 @@ class PCMAudioPlayer {
   playPCM(base64Data: string) {
     if (!this.audioContext || !this.isPlaying) return;
 
-    console.log('[PCM] Playing chunk, size:', base64Data.length);
-
     try {
       const binaryString = atob(base64Data);
       const bytes = new Uint8Array(binaryString.length);
@@ -60,7 +58,7 @@ class PCMAudioPlayer {
       source.start(startTime);
       this.scheduledTime = startTime + audioBuffer.duration;
     } catch (error) {
-      console.error('PCM playback error:', error);
+      console.error('[PCM] Playback error:', error);
     }
   }
 
@@ -84,7 +82,6 @@ class PCMAudioPlayer {
 class MicrophoneCapture {
   private stream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
-  private workletNode: AudioWorkletNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private onAudioData: ((base64: string) => void) | null = null;
   private processor: ScriptProcessorNode | null = null;
@@ -109,7 +106,6 @@ class MicrophoneCapture {
     this.onAudioData = onAudioData;
 
     try {
-      // Get microphone access - browser will use native sample rate (44.1kHz or 48kHz)
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -119,26 +115,19 @@ class MicrophoneCapture {
         }
       });
 
-      // Create audio context at native sample rate
       this.audioContext = new AudioContext();
       const inputSampleRate = this.audioContext.sampleRate;
       console.log('[Microphone] Native sample rate:', inputSampleRate);
 
       this.source = this.audioContext.createMediaStreamSource(this.stream);
-
-      // Use ScriptProcessor for raw PCM data (deprecated but widely supported)
-      // Buffer size 4096 at 48kHz = ~85ms chunks
       this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
 
       this.processor.onaudioprocess = (e) => {
         if (!this.onAudioData) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
-
-        // Resample to 16kHz and convert to Int16
         const int16Data = this.resample(inputData, inputSampleRate);
 
-        // Convert to base64
         const bytes = new Uint8Array(int16Data.buffer);
         let binary = '';
         for (let i = 0; i < bytes.length; i++) {
@@ -146,12 +135,10 @@ class MicrophoneCapture {
         }
         const base64 = btoa(binary);
 
-        console.log('[Microphone] Sent chunk:', base64.length);
         this.onAudioData(base64);
       };
 
       this.source.connect(this.processor);
-      // Connect to destination to keep the processor running (but muted)
       this.processor.connect(this.audioContext.destination);
 
       console.log('[Microphone] Started capturing audio');
@@ -167,10 +154,6 @@ class MicrophoneCapture {
     if (this.processor) {
       this.processor.disconnect();
       this.processor = null;
-    }
-    if (this.workletNode) {
-      this.workletNode.disconnect();
-      this.workletNode = null;
     }
     if (this.source) {
       this.source.disconnect();
@@ -195,6 +178,7 @@ export interface GeminiLiveState {
   isSpeaking: boolean;
   lastTranscript: string;
   error: string | null;
+  fatalError: boolean; // NEW: prevents reconnect loop
 }
 
 export interface GeminiLiveActions {
@@ -207,6 +191,19 @@ export interface GeminiLiveActions {
   interrupt: () => void;
 }
 
+// Fatal error codes that should NOT trigger reconnect
+const FATAL_CLOSE_CODES = [
+  1002, // Protocol error
+  1003, // Unsupported data
+  1007, // Invalid payload
+  1008, // Policy violation
+  1009, // Message too big
+  1010, // Missing extension
+  1011, // Internal error
+  1015, // TLS handshake
+  4000, 4001, 4002, 4003, 4004, 4005, // Custom API errors
+];
+
 export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -214,22 +211,71 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [lastTranscript, setLastTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [fatalError, setFatalError] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioPlayerRef = useRef<PCMAudioPlayer | null>(null);
   const micRef = useRef<MicrophoneCapture | null>(null);
   const currentContextRef = useRef<{ fen: string; playerSide: string; childName: string } | null>(null);
+  const connectAttempts = useRef(0);
+
+  // Full cleanup helper
+  const fullCleanup = useCallback(() => {
+    console.log('[Gemini] 🧹 Full cleanup');
+
+    // Stop microphone
+    if (micRef.current) {
+      micRef.current.stop();
+      micRef.current = null;
+    }
+
+    // Stop audio
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.stop();
+    }
+
+    // Close WebSocket
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    // Reset ALL states
+    setIsConnected(false);
+    setIsConnecting(false);
+    setIsListening(false);
+    setIsSpeaking(false);
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      disconnect();
+      fullCleanup();
     };
-  }, []);
+  }, [fullCleanup]);
 
   const connect = useCallback(async (): Promise<boolean> => {
-    if (isConnected || isConnecting) return false;
+    // BLOCK if fatal error occurred
+    if (fatalError) {
+      console.error('[Gemini] ❌ BLOCKED: Fatal error occurred, refresh page to retry');
+      return false;
+    }
 
+    if (isConnected || isConnecting) {
+      console.log('[Gemini] Already connected/connecting, skipping');
+      return false;
+    }
+
+    // Limit reconnect attempts
+    connectAttempts.current++;
+    if (connectAttempts.current > 5) {
+      console.error('[Gemini] ❌ Too many connect attempts, stopping');
+      setFatalError(true);
+      setError('Too many connection attempts');
+      return false;
+    }
+
+    console.log(`[Gemini] 🔌 Connecting (attempt ${connectAttempts.current})...`);
     setIsConnecting(true);
     setError(null);
 
@@ -244,10 +290,12 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
       wsRef.current = ws;
 
       return new Promise((resolve) => {
-        ws.onopen = () => {
-          console.log('Gemini Live: WebSocket connected');
+        let resolved = false;
 
-          // Send setup message - Gemini 2.0 Live API format
+        ws.onopen = () => {
+          console.log('[Gemini] ✅ WebSocket connected');
+
+          // MINIMAL setup message - only required fields
           const setupMessage = {
             setup: {
               model: 'models/gemini-2.0-flash-exp',
@@ -267,31 +315,45 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
             }
           };
 
-          console.log('[Gemini] Sending setup:', JSON.stringify(setupMessage));
+          console.log('[Gemini] 📤 Sending setup');
           ws.send(JSON.stringify(setupMessage));
         };
 
         ws.onmessage = async (event) => {
           let messageText: string;
 
-          // Handle both Blob and string messages
           if (event.data instanceof Blob) {
             messageText = await event.data.text();
           } else {
             messageText = event.data;
           }
 
-          console.log('[Gemini] Raw message:', messageText.substring(0, 200));
-
           try {
             const data = JSON.parse(messageText);
 
             // Setup complete
             if (data.setupComplete) {
-              console.log('Gemini Live: Setup complete');
+              console.log('[Gemini] ✅ Setup complete');
+              connectAttempts.current = 0; // Reset on success
               setIsConnected(true);
               setIsConnecting(false);
-              resolve(true);
+              if (!resolved) {
+                resolved = true;
+                resolve(true);
+              }
+              return;
+            }
+
+            // Error from server
+            if (data.error) {
+              console.error('[Gemini] ❌ Server error:', data.error);
+              setError(data.error.message || 'Server error');
+              setFatalError(true);
+              fullCleanup();
+              if (!resolved) {
+                resolved = true;
+                resolve(false);
+              }
               return;
             }
 
@@ -300,83 +362,80 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
               const parts = data.serverContent.modelTurn?.parts || [];
 
               for (const part of parts) {
-                // Audio data - mimeType can be 'audio/pcm' or 'audio/pcm;rate=24000'
                 if (part.inlineData?.mimeType?.startsWith('audio/pcm')) {
                   setIsSpeaking(true);
                   audioPlayerRef.current?.playPCM(part.inlineData.data);
                 }
 
-                // Text transcript
                 if (part.text) {
                   setLastTranscript(part.text);
                 }
               }
 
-              // Turn complete
               if (data.serverContent.turnComplete) {
                 setIsSpeaking(false);
               }
             }
 
-            // Tool call (if needed in future)
-            if (data.toolCall) {
-              console.log('Gemini Live: Tool call received', data.toolCall);
-            }
-
           } catch (e) {
-            console.error('Gemini Live: Message parse error', e);
+            console.error('[Gemini] Parse error:', e);
           }
         };
 
         ws.onerror = (e) => {
-          console.error('Gemini Live: WebSocket error', e);
+          console.error('[Gemini] ❌ WebSocket error:', e);
           setError('Connection error');
           setIsConnecting(false);
-          resolve(false);
+          if (!resolved) {
+            resolved = true;
+            resolve(false);
+          }
         };
 
         ws.onclose = (event) => {
-          console.log('Gemini Live: WebSocket closed', { code: event.code, reason: event.reason, wasClean: event.wasClean });
-          setIsConnected(false);
-          setIsConnecting(false);
-          setIsSpeaking(false);
+          // 🚨 CRITICAL: Detailed close logging
+          console.error(`[Gemini] 🔴 SOCKET CLOSED | code: ${event.code} | reason: "${event.reason}" | clean: ${event.wasClean}`);
+
+          // Check for fatal errors
+          if (FATAL_CLOSE_CODES.includes(event.code) || event.code >= 4000) {
+            console.error('[Gemini] ❌ FATAL ERROR - reconnect BLOCKED');
+            setFatalError(true);
+            setError(`Fatal error: ${event.code} - ${event.reason || 'Unknown'}`);
+          }
+
+          // 🚨 CRITICAL: Reset ALL UI state
+          fullCleanup();
+
+          if (!resolved) {
+            resolved = true;
+            resolve(false);
+          }
         };
 
         // Timeout
         setTimeout(() => {
-          if (!isConnected) {
+          if (!resolved) {
+            console.error('[Gemini] ⏱️ Connection timeout');
             ws.close();
             setError('Connection timeout');
             setIsConnecting(false);
+            resolved = true;
             resolve(false);
           }
         }, 10000);
       });
 
     } catch (e) {
-      console.error('Gemini Live: Connect error', e);
+      console.error('[Gemini] Connect error:', e);
       setError('Failed to connect');
       setIsConnecting(false);
       return false;
     }
-  }, [isConnected, isConnecting]);
+  }, [isConnected, isConnecting, fatalError, fullCleanup]);
 
   const disconnect = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (micRef.current) {
-      micRef.current.stop();
-      micRef.current = null;
-    }
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.stop();
-    }
-    setIsConnected(false);
-    setIsListening(false);
-    setIsSpeaking(false);
-  }, []);
+    fullCleanup();
+  }, [fullCleanup]);
 
   const sendChessContext = useCallback((fen: string, playerSide: 'white' | 'black', childName: string) => {
     currentContextRef.current = { fen, playerSide, childName };
@@ -387,7 +446,10 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
     move?: string,
     evaluation?: number
   ) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log('[Gemini] Cannot send event - socket not open');
+      return;
+    }
 
     const context = currentContextRef.current;
     let prompt = '';
@@ -397,10 +459,10 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
         prompt = `${context?.childName || 'Ученик'} начинает игру ${context?.playerSide === 'white' ? 'белыми' : 'чёрными'}. Поприветствуй и пожелай удачи!`;
         break;
       case 'child_move':
-        prompt = `${context?.childName || 'Ученик'} сделал ход ${move}. FEN: ${context?.fen}. ${evaluation !== undefined ? `Оценка: ${evaluation > 0 ? '+' : ''}${evaluation.toFixed(1)}` : ''} Прокомментируй ход кратко.`;
+        prompt = `${context?.childName || 'Ученик'} сделал ход ${move}. ${evaluation !== undefined ? `Оценка: ${evaluation > 0 ? '+' : ''}${evaluation.toFixed(1)}` : ''} Прокомментируй ход кратко.`;
         break;
       case 'ai_move':
-        prompt = `Компьютер сделал ход ${move}. FEN: ${context?.fen}. Кратко объясни этот ход.`;
+        prompt = `Компьютер сделал ход ${move}. Кратко объясни этот ход.`;
         break;
       case 'check':
         prompt = `Шах! Объясни, что делать при шахе.`;
@@ -410,7 +472,6 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
         break;
     }
 
-    // Send text message - don't set turnComplete to keep session alive
     const message = {
       clientContent: {
         turns: [
@@ -419,21 +480,21 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
             parts: [{ text: prompt }]
           }
         ],
-        turnComplete: true  // Must be true to get a response
+        turnComplete: true
       }
     };
 
-    console.log('[Gemini] Sending event:', event);
+    console.log('[Gemini] 📤 Sending event:', event);
     wsRef.current.send(JSON.stringify(message));
   }, []);
 
   const startListening = useCallback(async (): Promise<boolean> => {
     if (!isConnected || isListening) {
-      console.log('[Microphone] Cannot start: connected=', isConnected, 'listening=', isListening);
+      console.log('[Microphone] Cannot start - connected:', isConnected, 'listening:', isListening);
       return false;
     }
 
-    console.log('[Microphone] Starting listening...');
+    console.log('[Microphone] 🎙️ Starting...');
     micRef.current = new MicrophoneCapture();
 
     const success = await micRef.current.start((base64Audio) => {
@@ -449,18 +510,15 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
           }
         };
         wsRef.current.send(JSON.stringify(message));
-      } else {
-        console.log('[Microphone] WebSocket not open, state:', wsRef.current?.readyState);
       }
     });
 
     if (success) {
       setIsListening(true);
-      // Interrupt any current speech
       interrupt();
-      console.log('[Microphone] Listening started successfully');
+      console.log('[Microphone] ✅ Listening');
     } else {
-      console.log('[Microphone] Failed to start listening');
+      console.log('[Microphone] ❌ Failed to start');
     }
 
     return success;
@@ -472,6 +530,7 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
       micRef.current = null;
     }
     setIsListening(false);
+    console.log('[Microphone] 🛑 Stopped');
   }, []);
 
   const interrupt = useCallback(() => {
@@ -489,6 +548,7 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
     isSpeaking,
     lastTranscript,
     error,
+    fatalError,
     connect,
     disconnect,
     sendChessContext,

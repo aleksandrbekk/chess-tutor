@@ -290,8 +290,11 @@ function ChessGame() {
     return () => window.removeEventListener('resize', updateBoardSize);
   }, []);
 
-  // Подключение к Gemini Live при старте игры
+  // Подключение к Gemini Live при старте игры (только один раз)
   useEffect(() => {
+    // BLOCK if fatal error
+    if (geminiLive.fatalError) return;
+
     if (childName && !geminiLive.isConnected && !geminiLive.isConnecting) {
       geminiLive.connect().then(success => {
         if (success) {
@@ -300,7 +303,7 @@ function ChessGame() {
         }
       });
     }
-  }, [childName]);
+  }, [childName, geminiLive.fatalError]);
 
   // Обновляем контекст при изменении позиции
   useEffect(() => {
@@ -309,7 +312,7 @@ function ChessGame() {
     }
   }, [fen, playerSide, childName, geminiLive.isConnected]);
 
-  // Отправляем события о ходах (с авто-переподключением)
+  // Отправляем события о ходах (БЕЗ авто-переподключения - fatalError блокирует)
   useEffect(() => {
     const currentMoveCount = moveHistory.length;
     if (currentMoveCount <= prevMoveCountRef.current || currentMoveCount === 0) {
@@ -319,25 +322,15 @@ function ChessGame() {
     const lastMove = moveHistory[currentMoveCount - 1];
     prevMoveCountRef.current = currentMoveCount;
 
-    const sendMoveEvent = async () => {
-      // Reconnect if needed
-      if (!geminiLive.isConnected && !geminiLive.isConnecting) {
-        const success = await geminiLive.connect();
-        if (!success) return;
-        geminiLive.sendChessContext(fen, playerSide, childName);
+    // Only send if connected - NO reconnect here (causes loop)
+    if (geminiLive.isConnected) {
+      if (lastMove.isPlayerMove) {
+        geminiLive.sendGameEvent('child_move', lastMove.san, lastMove.evaluation);
+      } else {
+        geminiLive.sendGameEvent('ai_move', lastMove.san, lastMove.evaluation);
       }
-
-      if (geminiLive.isConnected) {
-        if (lastMove.isPlayerMove) {
-          geminiLive.sendGameEvent('child_move', lastMove.san, lastMove.evaluation);
-        } else {
-          geminiLive.sendGameEvent('ai_move', lastMove.san, lastMove.evaluation);
-        }
-      }
-    };
-
-    sendMoveEvent();
-  }, [moveHistory, fen, playerSide, childName]);
+    }
+  }, [moveHistory, geminiLive.isConnected]);
 
   // Событие конца игры
   useEffect(() => {
