@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 
-const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+// Gemini 2.0 Live API WebSocket endpoint
+const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent';
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
 const SYSTEM_INSTRUCTION = `Ты добрый шахматный тренер для детей 5-7 лет. Говори просто и коротко.
@@ -295,27 +296,27 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
         ws.onopen = () => {
           console.log('[Gemini] ✅ WebSocket connected');
 
-          // MINIMAL setup message - only required fields
+          // Setup message - v1alpha uses snake_case format
           const setupMessage = {
             setup: {
               model: 'models/gemini-2.0-flash-exp',
-              generationConfig: {
-                responseModalities: ['AUDIO'],
-                speechConfig: {
-                  voiceConfig: {
-                    prebuiltVoiceConfig: {
-                      voiceName: 'Puck'
+              generation_config: {
+                response_modalities: ['AUDIO'],
+                speech_config: {
+                  voice_config: {
+                    prebuilt_voice_config: {
+                      voice_name: 'Puck'
                     }
                   }
                 }
               },
-              systemInstruction: {
+              system_instruction: {
                 parts: [{ text: SYSTEM_INSTRUCTION }]
               }
             }
           };
 
-          console.log('[Gemini] 📤 Sending setup');
+          console.log('[Gemini] 📤 Sending setup:', JSON.stringify(setupMessage));
           ws.send(JSON.stringify(setupMessage));
         };
 
@@ -331,8 +332,8 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
           try {
             const data = JSON.parse(messageText);
 
-            // Setup complete
-            if (data.setupComplete) {
+            // Setup complete - handle both formats
+            if (data.setupComplete || data.setup_complete) {
               console.log('[Gemini] ✅ Setup complete');
               connectAttempts.current = 0; // Reset on success
               setIsConnected(true);
@@ -357,14 +358,19 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
               return;
             }
 
-            // Server content (audio response)
-            if (data.serverContent) {
-              const parts = data.serverContent.modelTurn?.parts || [];
+            // Server content (audio response) - handle both camelCase and snake_case
+            const serverContent = data.serverContent || data.server_content;
+            if (serverContent) {
+              const modelTurn = serverContent.modelTurn || serverContent.model_turn;
+              const parts = modelTurn?.parts || [];
 
               for (const part of parts) {
-                if (part.inlineData?.mimeType?.startsWith('audio/pcm')) {
+                const inlineData = part.inlineData || part.inline_data;
+                const mimeType = inlineData?.mimeType || inlineData?.mime_type;
+
+                if (mimeType?.startsWith('audio/pcm')) {
                   setIsSpeaking(true);
-                  audioPlayerRef.current?.playPCM(part.inlineData.data);
+                  audioPlayerRef.current?.playPCM(inlineData.data);
                 }
 
                 if (part.text) {
@@ -372,7 +378,8 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
                 }
               }
 
-              if (data.serverContent.turnComplete) {
+              const turnComplete = serverContent.turnComplete || serverContent.turn_complete;
+              if (turnComplete) {
                 setIsSpeaking(false);
               }
             }
@@ -472,15 +479,16 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
         break;
     }
 
+    // v1alpha format with snake_case
     const message = {
-      clientContent: {
+      client_content: {
         turns: [
           {
             role: 'user',
             parts: [{ text: prompt }]
           }
         ],
-        turnComplete: true
+        turn_complete: true
       }
     };
 
@@ -499,11 +507,12 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
 
     const success = await micRef.current.start((base64Audio) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
+        // v1alpha format with snake_case
         const message = {
-          realtimeInput: {
-            mediaChunks: [
+          realtime_input: {
+            media_chunks: [
               {
-                mimeType: 'audio/pcm;rate=16000',
+                mime_type: 'audio/pcm;rate=16000',
                 data: base64Audio
               }
             ]
