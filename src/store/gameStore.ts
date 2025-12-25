@@ -250,7 +250,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   makeMove: async (from: string, to: string): Promise<boolean> => {
-    const { game, playerSide, turn, childName, currentEval, moveHistory } = get();
+    const { game, playerSide, turn, childName, currentEval, moveHistory, difficulty } = get();
 
     // Check if it's player's turn
     const isPlayerTurn =
@@ -301,47 +301,51 @@ export const useGameStore = create<GameState>((set, get) => ({
         selectedSquare: null,
         possibleMoves: [],
         moveHistory: [...moveHistory, tempMoveRecord],
-        isAnalyzing: true,
+        isAnalyzing: difficulty === 'hard', // Анализ только для Мастера
       });
 
-      // Background: Get evaluation and analysis (non-blocking)
-      getPositionEval(newFen).then(async (evalData) => {
-        const evalAfter = evalData.eval;
+      // Детальный анализ только для уровня Мастер (hard)
+      // На других уровнях - мгновенный отклик без Lichess API
+      if (difficulty === 'hard') {
+        // Background: Get evaluation and analysis (non-blocking)
+        getPositionEval(newFen).then(async (evalData) => {
+          const evalAfter = evalData.eval;
 
-        const analysis = await analyzeMoveWithAI(
-          childName || 'Ученик',
-          fenBefore,
-          move.san,
-          evalBefore,
-          evalAfter,
-          evalData.bestMove ? uciToSan(new Chess(fenBefore), evalData.bestMove) : null,
-          true
-        );
+          const analysis = await analyzeMoveWithAI(
+            childName || 'Ученик',
+            fenBefore,
+            move.san,
+            evalBefore,
+            evalAfter,
+            evalData.bestMove ? uciToSan(new Chess(fenBefore), evalData.bestMove) : null,
+            true
+          );
 
-        // Update with real analysis data
-        const currentHistory = get().moveHistory;
-        const updatedHistory = currentHistory.map((record, idx) => {
-          if (idx === currentHistory.length - 1 && record.san === move.san) {
-            return {
-              ...record,
-              evaluation: evalAfter,
-              isBlunder: analysis.isBlunder,
-              isMistake: analysis.isMistake,
-              comment: analysis.comment,
-            };
-          }
-          return record;
+          // Update with real analysis data
+          const currentHistory = get().moveHistory;
+          const updatedHistory = currentHistory.map((record, idx) => {
+            if (idx === currentHistory.length - 1 && record.san === move.san) {
+              return {
+                ...record,
+                evaluation: evalAfter,
+                isBlunder: analysis.isBlunder,
+                isMistake: analysis.isMistake,
+                comment: analysis.comment,
+              };
+            }
+            return record;
+          });
+
+          set({
+            currentEval: evalAfter,
+            moveHistory: updatedHistory,
+            lastAnalysis: analysis,
+            isAnalyzing: false,
+          });
+        }).catch(() => {
+          set({ isAnalyzing: false });
         });
-
-        set({
-          currentEval: evalAfter,
-          moveHistory: updatedHistory,
-          lastAnalysis: analysis,
-          isAnalyzing: false,
-        });
-      }).catch(() => {
-        set({ isAnalyzing: false });
-      });
+      }
 
       return true;
     } catch {
@@ -350,7 +354,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   makeAiMove: async () => {
-    const { game, gameOver, isThinking, moveHistory, difficulty } = get();
+    const { game, gameOver, isThinking, moveHistory, difficulty, currentEval } = get();
     if (gameOver || isThinking) return;
 
     set({ isThinking: true });
@@ -369,36 +373,36 @@ export const useGameStore = create<GameState>((set, get) => ({
 
       // В зависимости от уровня выбираем стратегию
       if (levelConfig.aiStrength === 'random') {
-        // Новичок: случайный ход
+        // Новичок: случайный ход (без Lichess API - мгновенно)
         const randomMove = moves[Math.floor(Math.random() * moves.length)];
         move = game.move(randomMove);
       } else if (levelConfig.aiStrength === 'weak') {
-        // Ученик: 50% случайный, 50% лучший ход
-        if (Math.random() < 0.5) {
-          const randomMove = moves[Math.floor(Math.random() * moves.length)];
-          move = game.move(randomMove);
-        } else {
-          // Пытаемся получить лучший ход
-          const response = await fetch(
-            `${LICHESS_API}?fen=${encodeURIComponent(fenBefore)}&multiPv=1`
-          );
-          if (response.ok) {
-            const data = await response.json();
-            const bestMoveUci = data.pvs?.[0]?.moves?.split(' ')?.[0];
-            if (bestMoveUci && bestMoveUci.length >= 4) {
-              const from = bestMoveUci.slice(0, 2);
-              const to = bestMoveUci.slice(2, 4);
-              const promotion = bestMoveUci.length > 4 ? bestMoveUci[4] : undefined;
-              move = game.move({ from, to, promotion });
-            }
-          }
-          if (!move) {
-            const randomMove = moves[Math.floor(Math.random() * moves.length)];
-            move = game.move(randomMove);
-          }
+        // Ученик: улучшенный случайный (без Lichess API - мгновенно)
+        // Приоритет: взятия > шахи > развитие > случайный
+        const captures = moves.filter(m => m.captured);
+        const checks = moves.filter(m => {
+          const temp = new Chess(fenBefore);
+          temp.move(m);
+          return temp.inCheck();
+        });
+        const development = moves.filter(m =>
+          (m.piece === 'n' || m.piece === 'b') &&
+          (m.from[1] === '1' || m.from[1] === '8')
+        );
+
+        let candidates = captures.length > 0 ? captures :
+                        checks.length > 0 ? checks :
+                        development.length > 0 ? development : moves;
+
+        // 30% шанс сделать случайный ход вместо "умного"
+        if (Math.random() < 0.3) {
+          candidates = moves;
         }
+
+        const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+        move = game.move(chosen);
       } else {
-        // Мастер: всегда лучший ход
+        // Мастер: всегда лучший ход через Lichess API
         const response = await fetch(
           `${LICHESS_API}?fen=${encodeURIComponent(fenBefore)}&multiPv=1`
         );
@@ -437,9 +441,12 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
       }
 
-      // Get evaluation after AI move
-      const evalData = await getPositionEval(newFen);
-      const evalAfter = evalData.eval;
+      // Оценка позиции: только для Мастера (hard) - остальные уровни без задержки
+      let evalAfter = currentEval;
+      if (difficulty === 'hard') {
+        const evalData = await getPositionEval(newFen);
+        evalAfter = evalData.eval;
+      }
 
       const newMoveRecord: MoveRecord = {
         moveNumber: Math.ceil((moveHistory.length + 1) / 2),
