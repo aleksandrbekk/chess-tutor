@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Chessboard } from 'react-chessboard';
 import WebApp from '@twa-dev/sdk';
 import { useGameStore } from './store/gameStore';
-import type { MoveRecord } from './store/gameStore';
+import type { MoveRecord, DifficultyLevel } from './store/gameStore';
+import { LEVELS } from './store/gameStore';
 import { askTutor } from './api/gemini';
 import type { ChatMessage } from './api/gemini';
 import { useGeminiLive } from './hooks/useGeminiLive';
@@ -45,65 +46,248 @@ function initTelegram() {
   }
 }
 
-// Name Input Screen
-function NameInput() {
+// Start Screen with Level Selection and Stats
+function StartScreen() {
   const [name, setName] = useState('');
-  const { setChildName, startGame } = useGameStore();
+  const { setChildName, startGame, difficulty, setDifficulty, stats } = useGameStore();
 
   useEffect(() => { initTelegram(); }, []);
 
   const handleStart = async (side: 'white' | 'black') => {
     const childName = name || 'Ученик';
     setChildName(childName);
-    // startGame will call notifyCoach with 'game_start' event
     startGame(side);
   };
+
+  const levelKeys: DifficultyLevel[] = ['easy', 'medium', 'hard'];
 
   return (
     <div style={{
       height: '100dvh',
       background: GLASS.bgGradient,
-      padding: '100px 20px 40px',
+      padding: '40px 20px',
+      paddingTop: 'calc(env(safe-area-inset-top, 0px) + 40px)',
       boxSizing: 'border-box',
       display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      overflowY: 'auto',
+    }}>
+      <div style={{ width: '100%', maxWidth: '380px' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+          <div style={{ fontSize: '64px', marginBottom: '12px', filter: 'drop-shadow(0 0 20px rgba(0, 212, 255, 0.5))' }}>♟</div>
+          <h1 style={{ fontSize: '28px', fontWeight: '700', color: GLASS.text, margin: 0 }}>Шахматик</h1>
+          <p style={{ fontSize: '16px', color: GLASS.textMuted, marginTop: '8px' }}>Тренер с голосовым AI</p>
+        </div>
+
+        {/* Stats Card */}
+        {stats.gamesPlayed > 0 && (
+          <div style={{ ...GLASS.panel, padding: '16px 20px', marginBottom: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-around', textAlign: 'center' }}>
+              <div>
+                <div style={{ fontSize: '24px', fontWeight: '700', color: GLASS.text }}>{stats.gamesPlayed}</div>
+                <div style={{ fontSize: '12px', color: GLASS.textMuted }}>Игр</div>
+              </div>
+              <div>
+                <div style={{ fontSize: '24px', fontWeight: '700', color: GLASS.success }}>{stats.wins}</div>
+                <div style={{ fontSize: '12px', color: GLASS.textMuted }}>Побед</div>
+              </div>
+              <div>
+                <div style={{ fontSize: '24px', fontWeight: '700', color: GLASS.danger }}>{stats.losses}</div>
+                <div style={{ fontSize: '12px', color: GLASS.textMuted }}>Поражений</div>
+              </div>
+              <div>
+                <div style={{ fontSize: '24px', fontWeight: '700', color: GLASS.accent }}>{stats.draws}</div>
+                <div style={{ fontSize: '12px', color: GLASS.textMuted }}>Ничьих</div>
+              </div>
+            </div>
+            {stats.bestStreak > 0 && (
+              <div style={{ textAlign: 'center', marginTop: '12px', padding: '8px', background: 'rgba(255,170,0,0.15)', borderRadius: '10px' }}>
+                <span style={{ color: '#ffaa00', fontSize: '14px' }}>Лучшая серия: {stats.bestStreak} побед подряд</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Name Input */}
+        <div style={{ ...GLASS.panel, padding: '24px', marginBottom: '20px' }}>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Как тебя зовут?"
+            style={{
+              width: '100%', padding: '16px 20px', fontSize: '18px',
+              background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)',
+              borderRadius: '14px', color: GLASS.text, boxSizing: 'border-box',
+              outline: 'none',
+            }}
+          />
+        </div>
+
+        {/* Level Selection */}
+        <div style={{ ...GLASS.panel, padding: '20px', marginBottom: '20px' }}>
+          <p style={{ fontSize: '16px', fontWeight: '600', color: GLASS.text, margin: '0 0 14px 0', textAlign: 'center' }}>
+            Выбери уровень:
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {levelKeys.map((level) => {
+              const config = LEVELS[level];
+              const isSelected = difficulty === level;
+              return (
+                <button
+                  key={level}
+                  onClick={() => setDifficulty(level)}
+                  style={{
+                    padding: '14px 18px', borderRadius: '14px',
+                    border: isSelected ? '2px solid ' + GLASS.accent : '1px solid rgba(255,255,255,0.15)',
+                    background: isSelected ? 'rgba(0,212,255,0.15)' : 'rgba(255,255,255,0.05)',
+                    cursor: 'pointer', textAlign: 'left',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <span style={{ fontSize: '28px' }}>{config.emoji}</span>
+                    <div>
+                      <div style={{ fontSize: '17px', fontWeight: '600', color: GLASS.text }}>{config.name}</div>
+                      <div style={{ fontSize: '13px', color: GLASS.textMuted }}>{config.description}</div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Color Selection */}
+        <div style={{ ...GLASS.panel, padding: '20px' }}>
+          <p style={{ fontSize: '16px', fontWeight: '600', color: GLASS.text, margin: '0 0 14px 0', textAlign: 'center' }}>
+            Выбери цвет:
+          </p>
+          <div style={{ display: 'flex', gap: '14px' }}>
+            <button onClick={() => handleStart('white')} style={{
+              flex: 1, height: '60px', fontSize: '18px', fontWeight: '600', borderRadius: '16px',
+              border: '2px solid rgba(255,255,255,0.3)', background: 'rgba(255,255,255,0.15)',
+              color: GLASS.text, cursor: 'pointer',
+            }}>♔ Белые</button>
+            <button onClick={() => handleStart('black')} style={{
+              flex: 1, height: '60px', fontSize: '18px', fontWeight: '600', borderRadius: '16px',
+              border: 'none', background: 'linear-gradient(135deg, #2d2d2d 0%, #1a1a1a 100%)',
+              color: GLASS.text, cursor: 'pointer',
+            }}>♚ Чёрные</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Game Over Screen with Stats
+function GameOverScreen() {
+  const { gameResult, stats, goToStart, gameAnalysis, requestGameAnalysis, isAnalyzing, moveHistory, playerSide } = useGameStore();
+
+  // Определяем тип результата для отображения
+  const resultType = useMemo(() => {
+    if (!gameResult) return 'draw';
+    if (gameResult.includes('Ничья') || gameResult.includes('Пат')) return 'draw';
+    const playerWon = (gameResult.includes('Белые победили') && playerSide === 'white') ||
+                      (gameResult.includes('Чёрные победили') && playerSide === 'black');
+    return playerWon ? 'win' : 'loss';
+  }, [gameResult, playerSide]);
+
+  return (
+    <div style={{
+      height: '100dvh',
+      background: GLASS.bgGradient,
+      padding: '40px 20px',
+      paddingTop: 'calc(env(safe-area-inset-top, 0px) + 60px)',
+      boxSizing: 'border-box',
+      display: 'flex',
+      flexDirection: 'column',
       alignItems: 'center',
       justifyContent: 'center',
     }}>
-      <div style={{ width: '100%', maxWidth: '380px', padding: '40px 28px', ...GLASS.panel }}>
-        <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-          <div style={{ fontSize: '64px', marginBottom: '16px', filter: 'drop-shadow(0 0 20px rgba(0, 212, 255, 0.5))' }}>♟</div>
-          <h1 style={{ fontSize: '28px', fontWeight: '700', color: GLASS.text, margin: 0 }}>Шахматный тренер</h1>
-          <p style={{ fontSize: '16px', color: GLASS.textMuted, marginTop: '8px' }}>AI комментирует каждый ход</p>
+      <div style={{ width: '100%', maxWidth: '380px', ...GLASS.panel, padding: '32px 24px', textAlign: 'center' }}>
+        {/* Result Icon */}
+        <div style={{
+          fontSize: '72px',
+          marginBottom: '16px',
+          filter: resultType === 'win' ? 'drop-shadow(0 0 30px rgba(0,255,136,0.6))' : resultType === 'loss' ? 'drop-shadow(0 0 30px rgba(255,68,102,0.6))' : 'none',
+        }}>
+          {resultType === 'win' ? '🏆' : resultType === 'loss' ? '😢' : '🤝'}
         </div>
 
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Как тебя зовут?"
-          style={{
-            width: '100%', padding: '18px 22px', fontSize: '18px',
-            background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)',
-            borderRadius: '16px', color: GLASS.text, boxSizing: 'border-box',
-            marginBottom: '24px', outline: 'none',
-          }}
-        />
+        {/* Result Text */}
+        <h2 style={{
+          fontSize: '26px', fontWeight: '700', margin: '0 0 8px 0',
+          color: resultType === 'win' ? GLASS.success : resultType === 'loss' ? GLASS.danger : GLASS.accent,
+        }}>
+          {resultType === 'win' ? 'Победа!' : resultType === 'loss' ? 'Поражение' : 'Ничья'}
+        </h2>
+        <p style={{ fontSize: '16px', color: GLASS.textMuted, margin: '0 0 24px 0' }}>{gameResult}</p>
 
-        <p style={{ textAlign: 'center', fontSize: '18px', fontWeight: '500', color: GLASS.text, marginBottom: '16px' }}>
-          Выбери цвет:
-        </p>
+        {/* Stats Summary */}
+        <div style={{
+          display: 'flex', justifyContent: 'space-around', padding: '16px',
+          background: 'rgba(255,255,255,0.05)', borderRadius: '14px', marginBottom: '24px',
+        }}>
+          <div>
+            <div style={{ fontSize: '22px', fontWeight: '700', color: GLASS.text }}>{stats.gamesPlayed}</div>
+            <div style={{ fontSize: '11px', color: GLASS.textMuted }}>Всего игр</div>
+          </div>
+          <div>
+            <div style={{ fontSize: '22px', fontWeight: '700', color: GLASS.success }}>{stats.wins}</div>
+            <div style={{ fontSize: '11px', color: GLASS.textMuted }}>Побед</div>
+          </div>
+          <div>
+            <div style={{ fontSize: '22px', fontWeight: '700', color: GLASS.accent }}>
+              {stats.gamesPlayed > 0 ? Math.round((stats.wins / stats.gamesPlayed) * 100) : 0}%
+            </div>
+            <div style={{ fontSize: '11px', color: GLASS.textMuted }}>Winrate</div>
+          </div>
+        </div>
 
-        <div style={{ display: 'flex', gap: '16px' }}>
-          <button onClick={() => handleStart('white')} style={{
-            flex: 1, height: '60px', fontSize: '18px', fontWeight: '600', borderRadius: '16px',
-            border: '2px solid rgba(255,255,255,0.3)', background: 'rgba(255,255,255,0.15)',
-            color: GLASS.text, cursor: 'pointer',
-          }}>♔ Белые</button>
-          <button onClick={() => handleStart('black')} style={{
-            flex: 1, height: '60px', fontSize: '18px', fontWeight: '600', borderRadius: '16px',
-            border: 'none', background: 'linear-gradient(135deg, #2d2d2d 0%, #1a1a1a 100%)',
-            color: GLASS.text, cursor: 'pointer',
-          }}>♚ Чёрные</button>
+        {/* Current Streak */}
+        {stats.currentStreak > 0 && (
+          <div style={{
+            padding: '12px', background: 'rgba(0,255,136,0.15)', borderRadius: '12px',
+            marginBottom: '20px', border: '1px solid rgba(0,255,136,0.3)',
+          }}>
+            <span style={{ color: GLASS.success, fontSize: '16px', fontWeight: '600' }}>
+              🔥 Серия побед: {stats.currentStreak}
+            </span>
+          </div>
+        )}
+
+        {/* Game Analysis */}
+        {gameAnalysis && (
+          <div style={{
+            padding: '14px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px',
+            marginBottom: '20px', textAlign: 'left',
+          }}>
+            <p style={{ fontSize: '14px', color: GLASS.text, margin: 0, lineHeight: 1.5 }}>{gameAnalysis}</p>
+          </div>
+        )}
+
+        {/* Buttons */}
+        <div style={{ display: 'flex', gap: '12px', flexDirection: 'column' }}>
+          {!gameAnalysis && moveHistory.length > 0 && (
+            <button onClick={requestGameAnalysis} disabled={isAnalyzing} style={{
+              height: '52px', fontSize: '16px', fontWeight: '600', borderRadius: '14px', border: 'none',
+              background: 'linear-gradient(135deg, #ffaa00 0%, #ff8800 100%)',
+              color: '#FFF', cursor: 'pointer', opacity: isAnalyzing ? 0.6 : 1,
+            }}>
+              {isAnalyzing ? 'Анализирую...' : '📊 Анализ партии'}
+            </button>
+          )}
+          <button onClick={goToStart} style={{
+            height: '52px', fontSize: '17px', fontWeight: '600', borderRadius: '14px', border: 'none',
+            background: 'linear-gradient(135deg, #00d4ff 0%, #0088cc 100%)',
+            color: '#FFF', cursor: 'pointer',
+          }}>
+            🎮 Новая игра
+          </button>
         </div>
       </div>
     </div>
@@ -296,7 +480,10 @@ function ChessGame() {
     if (geminiLive.fatalError) return;
 
     if (childName && !geminiLive.isConnected && !geminiLive.isConnecting) {
-      geminiLive.connect().then(success => {
+      // СНАЧАЛА разблокируем AudioContext, потом подключаемся
+      geminiLive.unlockAudio().then(() => {
+        return geminiLive.connect();
+      }).then(success => {
         if (success) {
           geminiLive.sendChessContext(fen, playerSide, childName);
           geminiLive.sendGameEvent('game_start');
@@ -338,6 +525,26 @@ function ChessGame() {
       geminiLive.sendGameEvent('game_end');
     }
   }, [gameOver, geminiLive.isConnected]);
+
+  // Переход на экран результата с задержкой
+  const { recordGameResult } = useGameStore();
+  useEffect(() => {
+    if (gameOver && gameResult) {
+      // Подождём 2 секунды чтобы увидеть доску и услышать тренера
+      const timer = setTimeout(() => {
+        let result: 'win' | 'loss' | 'draw' = 'draw';
+        if (gameResult.includes('Ничья') || gameResult.includes('Пат')) {
+          result = 'draw';
+        } else {
+          const playerWon = (gameResult.includes('Белые победили') && playerSide === 'white') ||
+                            (gameResult.includes('Чёрные победили') && playerSide === 'black');
+          result = playerWon ? 'win' : 'loss';
+        }
+        recordGameResult(result);
+      }, 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [gameOver, gameResult, playerSide, recordGameResult]);
 
   // AI move
   useEffect(() => {
@@ -588,9 +795,15 @@ function ChessGame() {
 }
 
 function App() {
-  const gameState = useGameStore();
-  const hasStarted = gameState.childName !== '';
-  return hasStarted ? <ChessGame /> : <NameInput />;
+  const { screen } = useGameStore();
+
+  if (screen === 'start') {
+    return <StartScreen />;
+  } else if (screen === 'gameOver') {
+    return <GameOverScreen />;
+  } else {
+    return <ChessGame />;
+  }
 }
 
 export default App;

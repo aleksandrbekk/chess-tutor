@@ -5,6 +5,80 @@ import type { MoveAnalysis } from '../api/gemini';
 
 const LICHESS_API = 'https://lichess.org/api/cloud-eval';
 
+// Уровни сложности
+export type DifficultyLevel = 'easy' | 'medium' | 'hard';
+
+export interface LevelConfig {
+  name: string;
+  description: string;
+  hintsCount: number;
+  aiStrength: 'random' | 'weak' | 'strong';
+  emoji: string;
+}
+
+export const LEVELS: Record<DifficultyLevel, LevelConfig> = {
+  easy: {
+    name: 'Новичок',
+    description: 'Компьютер делает случайные ходы',
+    hintsCount: 10,
+    aiStrength: 'random',
+    emoji: '🌟',
+  },
+  medium: {
+    name: 'Ученик',
+    description: 'Компьютер иногда ошибается',
+    hintsCount: 5,
+    aiStrength: 'weak',
+    emoji: '⚡',
+  },
+  hard: {
+    name: 'Мастер',
+    description: 'Компьютер играет сильно',
+    hintsCount: 3,
+    aiStrength: 'strong',
+    emoji: '🏆',
+  },
+};
+
+// Статистика игр
+export interface GameStats {
+  gamesPlayed: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  currentStreak: number;
+  bestStreak: number;
+}
+
+const STATS_KEY = 'chess-tutor-stats';
+
+function loadStats(): GameStats {
+  try {
+    const saved = localStorage.getItem(STATS_KEY);
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error('Failed to load stats:', e);
+  }
+  return {
+    gamesPlayed: 0,
+    wins: 0,
+    losses: 0,
+    draws: 0,
+    currentStreak: 0,
+    bestStreak: 0,
+  };
+}
+
+function saveStats(stats: GameStats): void {
+  try {
+    localStorage.setItem(STATS_KEY, JSON.stringify(stats));
+  } catch (e) {
+    console.error('Failed to save stats:', e);
+  }
+}
+
 export interface MoveRecord {
   moveNumber: number;
   san: string;
@@ -17,6 +91,13 @@ export interface MoveRecord {
 }
 
 interface GameState {
+  // Экран (start, playing, gameOver)
+  screen: 'start' | 'playing' | 'gameOver';
+
+  // Уровень и статистика
+  difficulty: DifficultyLevel;
+  stats: GameStats;
+
   childName: string;
   game: Chess;
   fen: string;
@@ -38,16 +119,20 @@ interface GameState {
   shouldUndo: boolean;
   lastCoachComment: string | null;
 
+  // Actions
   setChildName: (name: string) => void;
+  setDifficulty: (level: DifficultyLevel) => void;
   startGame: (side: 'white' | 'black') => void;
   makeMove: (from: string, to: string) => Promise<boolean>;
   makeAiMove: () => Promise<void>;
   handleHint: () => Promise<void>;
   selectSquare: (square: string | null) => void;
   resetGame: () => void;
+  goToStart: () => void;
   requestGameAnalysis: () => Promise<void>;
   undoMove: () => void;
   dismissUndo: () => void;
+  recordGameResult: (result: 'win' | 'loss' | 'draw') => void;
 }
 
 // Convert UCI move to SAN
@@ -66,6 +151,10 @@ function uciToSan(game: Chess, uci: string): string {
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
+  screen: 'start',
+  difficulty: 'easy',
+  stats: loadStats(),
+
   childName: '',
   game: new Chess(),
   fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
@@ -89,16 +178,21 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   setChildName: (name: string) => set({ childName: name }),
 
+  setDifficulty: (level: DifficultyLevel) => set({ difficulty: level }),
+
   startGame: (side: 'white' | 'black') => {
+    const { difficulty } = get();
+    const levelConfig = LEVELS[difficulty];
     const game = new Chess();
     set({
+      screen: 'playing',
       game,
       fen: game.fen(),
       playerSide: side,
       turn: 'w',
       gameOver: false,
       gameResult: null,
-      hintsRemaining: 5,
+      hintsRemaining: levelConfig.hintsCount,
       currentHint: null,
       selectedSquare: null,
       possibleMoves: [],
@@ -110,6 +204,49 @@ export const useGameStore = create<GameState>((set, get) => ({
       lastCoachComment: null,
     });
     // Gemini Live подключение и game_start событие обрабатываются в App.tsx
+  },
+
+  goToStart: () => {
+    const game = new Chess();
+    set({
+      screen: 'start',
+      game,
+      fen: game.fen(),
+      turn: 'w',
+      gameOver: false,
+      gameResult: null,
+      currentHint: null,
+      isThinking: false,
+      selectedSquare: null,
+      possibleMoves: [],
+      currentEval: 0,
+      moveHistory: [],
+      lastAnalysis: null,
+      gameAnalysis: null,
+      shouldUndo: false,
+      lastCoachComment: null,
+    });
+  },
+
+  recordGameResult: (result: 'win' | 'loss' | 'draw') => {
+    const { stats } = get();
+    const newStats = { ...stats, gamesPlayed: stats.gamesPlayed + 1 };
+
+    if (result === 'win') {
+      newStats.wins = stats.wins + 1;
+      newStats.currentStreak = stats.currentStreak + 1;
+      if (newStats.currentStreak > newStats.bestStreak) {
+        newStats.bestStreak = newStats.currentStreak;
+      }
+    } else if (result === 'loss') {
+      newStats.losses = stats.losses + 1;
+      newStats.currentStreak = 0;
+    } else {
+      newStats.draws = stats.draws + 1;
+    }
+
+    saveStats(newStats);
+    set({ stats: newStats, screen: 'gameOver' });
   },
 
   makeMove: async (from: string, to: string): Promise<boolean> => {
@@ -213,43 +350,71 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   makeAiMove: async () => {
-    const { game, gameOver, isThinking, moveHistory } = get();
+    const { game, gameOver, isThinking, moveHistory, difficulty } = get();
     if (gameOver || isThinking) return;
 
     set({ isThinking: true });
 
     const fenBefore = game.fen();
+    const levelConfig = LEVELS[difficulty];
 
     try {
-      const response = await fetch(
-        `${LICHESS_API}?fen=${encodeURIComponent(fenBefore)}&multiPv=1`
-      );
-
       let move: Move | null = null;
+      const moves = game.moves({ verbose: true });
 
-      if (!response.ok) {
-        // Fallback to random move
-        const moves = game.moves({ verbose: true });
-        if (moves.length > 0) {
+      if (moves.length === 0) {
+        set({ isThinking: false });
+        return;
+      }
+
+      // В зависимости от уровня выбираем стратегию
+      if (levelConfig.aiStrength === 'random') {
+        // Новичок: случайный ход
+        const randomMove = moves[Math.floor(Math.random() * moves.length)];
+        move = game.move(randomMove);
+      } else if (levelConfig.aiStrength === 'weak') {
+        // Ученик: 50% случайный, 50% лучший ход
+        if (Math.random() < 0.5) {
           const randomMove = moves[Math.floor(Math.random() * moves.length)];
           move = game.move(randomMove);
-        }
-      } else {
-        const data = await response.json();
-        const bestMoveUci = data.pvs?.[0]?.moves?.split(' ')?.[0];
-
-        if (bestMoveUci && bestMoveUci.length >= 4) {
-          const from = bestMoveUci.slice(0, 2);
-          const to = bestMoveUci.slice(2, 4);
-          const promotion = bestMoveUci.length > 4 ? bestMoveUci[4] : undefined;
-          move = game.move({ from, to, promotion });
         } else {
-          // Fallback to random move
-          const moves = game.moves({ verbose: true });
-          if (moves.length > 0) {
+          // Пытаемся получить лучший ход
+          const response = await fetch(
+            `${LICHESS_API}?fen=${encodeURIComponent(fenBefore)}&multiPv=1`
+          );
+          if (response.ok) {
+            const data = await response.json();
+            const bestMoveUci = data.pvs?.[0]?.moves?.split(' ')?.[0];
+            if (bestMoveUci && bestMoveUci.length >= 4) {
+              const from = bestMoveUci.slice(0, 2);
+              const to = bestMoveUci.slice(2, 4);
+              const promotion = bestMoveUci.length > 4 ? bestMoveUci[4] : undefined;
+              move = game.move({ from, to, promotion });
+            }
+          }
+          if (!move) {
             const randomMove = moves[Math.floor(Math.random() * moves.length)];
             move = game.move(randomMove);
           }
+        }
+      } else {
+        // Мастер: всегда лучший ход
+        const response = await fetch(
+          `${LICHESS_API}?fen=${encodeURIComponent(fenBefore)}&multiPv=1`
+        );
+        if (response.ok) {
+          const data = await response.json();
+          const bestMoveUci = data.pvs?.[0]?.moves?.split(' ')?.[0];
+          if (bestMoveUci && bestMoveUci.length >= 4) {
+            const from = bestMoveUci.slice(0, 2);
+            const to = bestMoveUci.slice(2, 4);
+            const promotion = bestMoveUci.length > 4 ? bestMoveUci[4] : undefined;
+            move = game.move({ from, to, promotion });
+          }
+        }
+        if (!move) {
+          const randomMove = moves[Math.floor(Math.random() * moves.length)];
+          move = game.move(randomMove);
         }
       }
 
