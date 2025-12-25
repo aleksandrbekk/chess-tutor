@@ -1,8 +1,9 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 
-// Gemini 2.0 Live API WebSocket endpoint
+// Gemini 2.0 Flash - проверенная рабочая модель для Live API
 const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent';
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+const MODEL_ID = 'models/gemini-2.0-flash-exp';
 
 const SYSTEM_INSTRUCTION = `Ты добрый шахматный тренер для детей 5-7 лет. Говори просто и коротко.
 - Хвали за хорошие ходы
@@ -31,6 +32,8 @@ class PCMAudioPlayer {
 
   playPCM(base64Data: string) {
     if (!this.audioContext || !this.isPlaying) return;
+
+    console.log('[PCM] 🔊 Playing, AudioContext state:', this.audioContext.state);
 
     try {
       const binaryString = atob(base64Data);
@@ -76,6 +79,28 @@ class PCMAudioPlayer {
       this.scheduledTime = this.audioContext.currentTime;
       this.isPlaying = true;
     }
+  }
+
+  // Разблокировка AudioContext для iOS/Telegram WebView
+  async forceUnlock(): Promise<void> {
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
+    }
+
+    if (this.audioContext.state === 'suspended') {
+      await this.audioContext.resume();
+    }
+
+    // Играем пустой буфер чтобы разблокировать
+    const buffer = this.audioContext.createBuffer(1, 1, this.sampleRate);
+    const source = this.audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.audioContext.destination);
+    source.start();
+
+    this.scheduledTime = this.audioContext.currentTime;
+    this.isPlaying = true;
+    console.log('[PCM] 🔓 AudioContext unlocked, state:', this.audioContext.state);
   }
 }
 
@@ -190,6 +215,7 @@ export interface GeminiLiveActions {
   startListening: () => Promise<boolean>;
   stopListening: () => void;
   interrupt: () => void;
+  unlockAudio: () => Promise<void>;
 }
 
 // Fatal error codes that should NOT trigger reconnect
@@ -219,6 +245,7 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
   const micRef = useRef<MicrophoneCapture | null>(null);
   const currentContextRef = useRef<{ fen: string; playerSide: string; childName: string } | null>(null);
   const connectAttempts = useRef(0);
+  const initLockRef = useRef(false); // Защита от двойного запуска в StrictMode
 
   // Full cleanup helper
   const fullCleanup = useCallback(() => {
@@ -246,6 +273,9 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
     setIsConnecting(false);
     setIsListening(false);
     setIsSpeaking(false);
+
+    // Разблокируем для повторного подключения
+    initLockRef.current = false;
   }, []);
 
   // Cleanup on unmount
@@ -266,6 +296,13 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
       console.log('[Gemini] Already connected/connecting, skipping');
       return false;
     }
+
+    // Защита от двойного запуска в React StrictMode
+    if (initLockRef.current) {
+      console.log('[Gemini] 🔒 Init lock active, skipping duplicate connect');
+      return false;
+    }
+    initLockRef.current = true;
 
     // Limit reconnect attempts
     connectAttempts.current++;
@@ -299,7 +336,7 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
           // Setup message - v1alpha uses snake_case format
           const setupMessage = {
             setup: {
-              model: 'models/gemini-2.0-flash-exp',
+              model: MODEL_ID,
               generation_config: {
                 response_modalities: ['AUDIO'],
                 speech_config: {
@@ -550,6 +587,14 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
     setIsSpeaking(false);
   }, []);
 
+  // Разблокировка AudioContext по первому клику пользователя
+  const unlockAudio = useCallback(async () => {
+    if (!audioPlayerRef.current) {
+      audioPlayerRef.current = new PCMAudioPlayer();
+    }
+    await audioPlayerRef.current.forceUnlock();
+  }, []);
+
   return {
     isConnected,
     isConnecting,
@@ -565,5 +610,6 @@ export function useGeminiLive(): GeminiLiveState & GeminiLiveActions {
     startListening,
     stopListening,
     interrupt,
+    unlockAudio,
   };
 }
